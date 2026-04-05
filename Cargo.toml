@@ -1,0 +1,13 @@
+[package]
+name = "gkill"
+description = "gkill"
+license-file = "LICENSE"
+version = "0.2.1"
+edition = "2024"
+
+repository = "https://github.com/ax-x2/gkill"
+homepage = "https://1000x.sh"
+
+[dependencies]
+libc = "0.2"
+regex = "1.12"
