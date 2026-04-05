@@ -1,6 +1,8 @@
-use regex::{Regex, RegexBuilder};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, BufRead};
+
+use regex::{Regex, RegexBuilder};
 
 use crate::cli::{Config, Signal};
 
@@ -10,6 +12,14 @@ pub struct ProcessInfo {
     pub uid: u32,
     pub start_time: u64,
     pub is_system: bool,
+    pub rss_kb: u64,
+    pub cpu_ticks: u64,
+}
+
+pub struct EmergencyEntry {
+    pub info: ProcessInfo,
+    pub is_top_ram: bool,
+    pub is_top_cpu: bool,
 }
 
 pub fn find_processes(config: &Config, current_uid: u32) -> Result<Vec<ProcessInfo>, String> {
@@ -25,51 +35,91 @@ pub fn find_processes(config: &Config, current_uid: u32) -> Result<Vec<ProcessIn
     for entry in proc_dir.flatten() {
         let file_name = entry.file_name();
         let pid_str = file_name.to_string_lossy();
-
         let Ok(pid) = pid_str.parse::<u32>() else {
             continue;
         };
 
-        if pid == current_pid || is_protected_pid(pid) || !can_signal_process(pid) {
-            continue;
-        }
-
-        let Some(uid) = process_uid(pid) else {
+        let Some(info) = collect_process_info(pid, current_uid, current_pid) else {
             continue;
         };
 
-        // non-root users can only signal their own processes; skip others early.
-        if current_uid != 0 && uid != current_uid {
+        if !matcher.is_match(&info.cmdline) {
             continue;
         }
 
-        let Some(start_time) = process_start_time(pid) else {
-            continue;
-        };
-
-        let Some(cmdline) = read_cmdline(pid) else {
-            continue;
-        };
-
-        if !matcher.is_match(&cmdline) {
-            continue;
-        }
-
-        results.push(ProcessInfo {
-            pid,
-            cmdline,
-            uid,
-            start_time,
-            is_system: uid == 0,
-        });
+        results.push(info);
     }
 
     results.sort_by_key(|p| p.pid);
     Ok(results)
 }
 
+pub fn find_top_processes(current_uid: u32) -> Result<Vec<EmergencyEntry>, String> {
+    let mut all: Vec<ProcessInfo> = Vec::new();
+    let current_pid = std::process::id();
+
+    let proc_dir = match fs::read_dir("/proc") {
+        Ok(dir) => dir,
+        Err(err) => return Err(format!("failed to read /proc: {err}")),
+    };
+
+    for entry in proc_dir.flatten() {
+        let file_name = entry.file_name();
+        let pid_str = file_name.to_string_lossy();
+        let Ok(pid) = pid_str.parse::<u32>() else {
+            continue;
+        };
+        if let Some(info) = collect_process_info(pid, current_uid, current_pid) {
+            all.push(info);
+        }
+    }
+
+    if all.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // top 3 indices by rss
+    let mut ram_order: Vec<usize> = (0..all.len()).collect();
+    ram_order.sort_unstable_by(|&a, &b| all[b].rss_kb.cmp(&all[a].rss_kb));
+    let top_ram: Vec<usize> = ram_order.into_iter().take(3).collect();
+
+    // top 3 indices by cpu
+    let mut cpu_order: Vec<usize> = (0..all.len()).collect();
+    cpu_order.sort_unstable_by(|&a, &b| all[b].cpu_ticks.cmp(&all[a].cpu_ticks));
+    let top_cpu: Vec<usize> = cpu_order.into_iter().take(3).collect();
+
+    let top_ram_set: HashSet<usize> = top_ram.iter().copied().collect();
+    let top_cpu_set: HashSet<usize> = top_cpu.iter().copied().collect();
+
+    // merge: ram entries first, then cpu-only entries
+    let mut result_indices: Vec<usize> = Vec::with_capacity(6);
+    for &i in &top_ram {
+        result_indices.push(i);
+    }
+    for &i in &top_cpu {
+        if !top_ram_set.contains(&i) {
+            result_indices.push(i);
+        }
+    }
+
+    let mut by_idx: HashMap<usize, ProcessInfo> = all.into_iter().enumerate().collect();
+    let result = result_indices
+        .iter()
+        .map(|&idx| {
+            let info = by_idx.remove(&idx).unwrap();
+            EmergencyEntry {
+                is_top_ram: top_ram_set.contains(&idx),
+                is_top_cpu: top_cpu_set.contains(&idx),
+                info,
+            }
+        })
+        .collect();
+
+    Ok(result)
+}
+
 pub fn verify_process(pid: u32, original_start_time: u64) -> bool {
-    process_start_time(pid) == Some(original_start_time)
+    process_stat(pid).map(|(st, _)| st) == Some(original_start_time)
 }
 
 pub fn kill_process(pid: u32, signal: Signal) -> io::Result<()> {
@@ -88,6 +138,32 @@ pub fn signal_name(signal: Signal) -> &'static str {
         Signal::Kill => "SIGKILL",
         Signal::Term => "SIGTERM",
     }
+}
+
+fn collect_process_info(pid: u32, current_uid: u32, current_pid: u32) -> Option<ProcessInfo> {
+    if pid == current_pid || is_protected_pid(pid) || !can_signal_process(pid) {
+        return None;
+    }
+
+    let (uid, rss_kb) = process_uid_and_rss(pid)?;
+
+    // non-root users can only signal their own processes
+    if current_uid != 0 && uid != current_uid {
+        return None;
+    }
+
+    let (start_time, cpu_ticks) = process_stat(pid)?;
+    let cmdline = read_cmdline(pid)?;
+
+    Some(ProcessInfo {
+        pid,
+        cmdline,
+        uid,
+        start_time,
+        is_system: uid == 0,
+        rss_kb,
+        cpu_ticks,
+    })
 }
 
 enum Matcher {
@@ -126,15 +202,24 @@ fn can_signal_process(pid: u32) -> bool {
     unsafe { libc::kill(pid as i32, 0) == 0 }
 }
 
-fn process_uid(pid: u32) -> Option<u32> {
+fn process_uid_and_rss(pid: u32) -> Option<(u32, u64)> {
     let file = fs::File::open(format!("/proc/{pid}/status")).ok()?;
     let reader = io::BufReader::new(file);
+    let mut uid: Option<u32> = None;
+    let mut rss_kb: Option<u64> = None;
+
     for line in reader.lines().map_while(Result::ok) {
         if line.starts_with("Uid:") {
-            return line.split_whitespace().nth(1)?.parse().ok();
+            uid = line.split_whitespace().nth(1)?.parse().ok();
+        } else if line.starts_with("VmRSS:") {
+            rss_kb = line.split_whitespace().nth(1)?.parse().ok();
+        }
+        if uid.is_some() && rss_kb.is_some() {
+            break;
         }
     }
-    None
+
+    Some((uid?, rss_kb.unwrap_or(0)))
 }
 
 fn read_cmdline(pid: u32) -> Option<String> {
@@ -162,9 +247,13 @@ fn read_cmdline(pid: u32) -> Option<String> {
         .filter(|comm| !comm.is_empty())
 }
 
-fn process_start_time(pid: u32) -> Option<u64> {
-    let stat_path = format!("/proc/{pid}/stat");
-    let stat = fs::read_to_string(stat_path).ok()?;
+fn process_stat(pid: u32) -> Option<(u64, u64)> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let (_, rest) = stat.rsplit_once(") ")?;
-    rest.split_whitespace().nth(19)?.parse::<u64>().ok()
+    let fields: Vec<&str> = rest.split_whitespace().collect();
+    // after ") ": idx 0=state, 11=utime, 12=stime, 19=starttime
+    let utime: u64 = fields.get(11)?.parse().ok()?;
+    let stime: u64 = fields.get(12)?.parse().ok()?;
+    let start_time: u64 = fields.get(19)?.parse().ok()?;
+    Some((start_time, utime + stime))
 }

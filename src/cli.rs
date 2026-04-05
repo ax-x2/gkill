@@ -4,6 +4,7 @@ pub struct Config {
     pub kill_all: bool,
     pub signal: Signal,
     pub use_regex: bool,
+    pub emergency: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -34,6 +35,7 @@ where
     let mut kill_all = false;
     let mut signal = Signal::Term;
     let mut use_regex = false;
+    let mut emergency = false;
     let mut query = None;
 
     for arg in args {
@@ -43,6 +45,7 @@ where
             "--all" => kill_all = true,
             "--regex" => use_regex = true,
             "--sigkill" | "-9" => signal = Signal::Kill,
+            "-e" | "--emergency" => emergency = true,
             _ if arg.starts_with('-') => {
                 return Err(ParseOutcome::Message(format!("unknown option: {arg}")));
             }
@@ -55,32 +58,45 @@ where
         }
     }
 
-    let query = query.ok_or_else(|| ParseOutcome::Message("missing search pattern".to_string()))?;
-    if query.trim().is_empty() {
-        return Err(ParseOutcome::Message(
-            "search pattern must not be empty".to_string(),
-        ));
+    if !emergency {
+        let q = query.ok_or_else(|| ParseOutcome::Message("missing search pattern".to_string()))?;
+        if q.trim().is_empty() {
+            return Err(ParseOutcome::Message(
+                "search pattern must not be empty".to_string(),
+            ));
+        }
+        return Ok(Config {
+            query: q,
+            force,
+            kill_all,
+            signal,
+            use_regex,
+            emergency,
+        });
     }
 
     Ok(Config {
-        query,
+        query: String::new(),
         force,
         kill_all,
         signal,
         use_regex,
+        emergency,
     })
 }
 
 pub fn print_usage() {
     eprintln!(
-        "usage: gkill [--force] [--all] [--regex] [--sigkill|-9] <pattern>\n\
+        "usage: gkill [options] <pattern>\n\
+         usage: gkill -e [options]\n\
          \n\
          options:\n\
-           --force      skip confirmation prompts\n\
-           --all        target all matching processes\n\
-           --regex      interpret <pattern> as a regex\n\
-           --sigkill    send SIGKILL instead of SIGTERM\n\
-           -9           alias for --sigkill\n\
-           -h, --help   show this help"
+           --force        skip confirmation prompts\n\
+           --all          target all matching processes\n\
+           --regex        interpret <pattern> as a regex\n\
+           --sigkill      send SIGKILL instead of SIGTERM\n\
+           -9             alias for --sigkill\n\
+           -e, --emergency  show top resource consumers (top 3 ram + top 3 cpu)\n\
+           -h, --help     show this help"
     );
 }

@@ -4,9 +4,10 @@ mod ui;
 
 use std::process;
 
-use cli::{parse_args, print_usage, ParseOutcome};
-use procfs::{find_processes, kill_process, verify_process};
-use ui::{choose_processes, print_matches, warn_if_system, SelectionOutcome};
+use cli::{Config, ParseOutcome, parse_args, print_usage};
+use procfs::{ProcessInfo, find_processes, find_top_processes, kill_process, verify_process};
+use ui::{SelectionOutcome, choose_emergency, choose_processes, print_emergency_matches,
+         print_matches, warn_if_system};
 
 fn main() {
     let config = match parse_args(std::env::args().skip(1)) {
@@ -24,32 +25,60 @@ fn main() {
 
     let current_uid = unsafe { libc::getuid() };
 
-    let matches = match find_processes(&config, current_uid) {
-        Ok(matches) => matches,
-        Err(message) => {
-            eprintln!("{message}");
-            process::exit(1);
-        }
-    };
-    if matches.is_empty() {
-        println!("no processes found matching '{}'", config.query);
-        process::exit(0);
-    }
-
-    print_matches(&matches, current_uid);
-
-    let selected = match choose_processes(&matches, &config) {
-        Ok(SelectionOutcome::Selected(selected)) => selected,
-        Ok(SelectionOutcome::Aborted) => {
-            println!("aborted");
+    if config.emergency {
+        let entries = match find_top_processes(current_uid) {
+            Ok(e) => e,
+            Err(msg) => {
+                eprintln!("{msg}");
+                process::exit(1);
+            }
+        };
+        if entries.is_empty() {
+            println!("no processes found");
             process::exit(0);
         }
-        Err(message) => {
-            eprintln!("{message}");
-            process::exit(1);
+        print_emergency_matches(&entries, current_uid);
+        let selected = match choose_emergency(&entries, &config) {
+            Ok(SelectionOutcome::Selected(s)) => s,
+            Ok(SelectionOutcome::Aborted) => {
+                println!("aborted");
+                process::exit(0);
+            }
+            Err(msg) => {
+                eprintln!("{msg}");
+                process::exit(1);
+            }
+        };
+        do_kill(selected, &config);
+    } else {
+        let matches = match find_processes(&config, current_uid) {
+            Ok(m) => m,
+            Err(msg) => {
+                eprintln!("{msg}");
+                process::exit(1);
+            }
+        };
+        if matches.is_empty() {
+            println!("no processes found matching '{}'", config.query);
+            process::exit(0);
         }
-    };
+        print_matches(&matches, current_uid);
+        let selected = match choose_processes(&matches, &config) {
+            Ok(SelectionOutcome::Selected(s)) => s,
+            Ok(SelectionOutcome::Aborted) => {
+                println!("aborted");
+                process::exit(0);
+            }
+            Err(msg) => {
+                eprintln!("{msg}");
+                process::exit(1);
+            }
+        };
+        do_kill(selected, &config);
+    }
+}
 
+fn do_kill(selected: Vec<&ProcessInfo>, config: &Config) {
     for proc in &selected {
         if !verify_process(proc.pid, proc.start_time) {
             eprintln!(
@@ -60,7 +89,7 @@ fn main() {
         }
     }
 
-    // warn about system processes when --force skipped the normal confirm path.
+    // warn about system processes when --force skipped the normal confirm path
     if config.force {
         warn_if_system(&selected);
     }
