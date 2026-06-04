@@ -6,8 +6,10 @@ use std::process;
 
 use cli::{Config, ParseOutcome, parse_args, print_usage};
 use procfs::{ProcessInfo, find_processes, find_top_processes, kill_process, verify_process};
-use ui::{SelectionOutcome, choose_emergency, choose_processes, print_emergency_matches,
-         print_matches, warn_if_system};
+use ui::{
+    SelectionOutcome, choose_emergency, choose_processes, print_emergency_matches, print_matches,
+    warn_if_system,
+};
 
 fn main() {
     let config = match parse_args(std::env::args().skip(1)) {

@@ -12,12 +12,18 @@ pub fn print_matches(matches: &[ProcessInfo], current_uid: u32) {
     for (idx, proc) in matches.iter().enumerate() {
         let owner = owner_label(proc.uid, current_uid);
         println!(
-            "{}. pid {} [{}] - {}",
+            "{}. pid {} ppid {} [{}] {:>9} {:>9} - {}",
             idx + 1,
             proc.pid,
+            proc.ppid,
             owner,
+            format_rss(proc.rss_kb),
+            format_cpu(proc.cpu_ticks),
             truncate(&proc.cmdline, 100)
         );
+        if let Some(exe_path) = visible_exe_path(proc) {
+            println!("   exe {}", truncate(exe_path, 100));
+        }
     }
 }
 
@@ -268,4 +274,54 @@ fn truncate(s: &str, max_len: usize) -> String {
         out.push_str("...");
     }
     out
+}
+
+fn visible_exe_path(proc: &ProcessInfo) -> Option<&str> {
+    let exe_path = proc.exe_path.as_deref()?;
+    if proc.cmdline == exe_path || proc.cmdline.contains(exe_path) {
+        return None;
+    }
+    Some(exe_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn process_info(cmdline: &str, exe_path: Option<&str>) -> ProcessInfo {
+        ProcessInfo {
+            pid: 100,
+            ppid: 10,
+            cmdline: cmdline.to_string(),
+            exe_path: exe_path.map(str::to_string),
+            uid: 1000,
+            start_time: 1,
+            is_system: false,
+            rss_kb: 0,
+            cpu_ticks: 0,
+        }
+    }
+
+    #[test]
+    fn visible_exe_path_hides_duplicate_cmdline_path() {
+        let info = process_info(
+            "/tmp/project/target/release/appname --flag",
+            Some("/tmp/project/target/release/appname"),
+        );
+
+        assert_eq!(visible_exe_path(&info), None);
+    }
+
+    #[test]
+    fn visible_exe_path_shows_distinct_resolved_path() {
+        let info = process_info(
+            "appname --flag",
+            Some("/tmp/project/target/release/appname"),
+        );
+
+        assert_eq!(
+            visible_exe_path(&info),
+            Some("/tmp/project/target/release/appname")
+        );
+    }
 }

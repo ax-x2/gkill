@@ -5,6 +5,7 @@ fast interactive process killer for linux
 ## features
 
 - /proc filesystem scanning
+- matches command lines and resolved executable paths
 - regex pattern matching (case-insensitive by default)
 - multi-process selection (`1 3` or `1,3` syntax)
 - emergency mode — top 3 ram + top 3 cpu consumers at a glance
@@ -26,6 +27,9 @@ sudo cp target/release/gkill /usr/local/bin/
 ```bash
 # search, select, confirm
 gkill firefox
+
+# find a binary
+gkill target/release/appname
 
 # select multiple processes at once
 gkill python   # then enter: 1 3  or  1,3  at the prompt
@@ -67,9 +71,9 @@ select one or more to kill, same as normal mode.
 
 ## how it works
 
-1. scans /proc for processes matching search string (or all processes in -e mode)
+1. scans /proc for processes whose command line or executable path matches the search string (or all processes in -e mode)
 2. filters to processes you can signal (permission check via kill(pid, 0))
-3. displays numbered list with pid, owner, and resource info
+3. displays numbered list with pid, ppid, owner, memory, cpu time, command line, and distinct executable path when available
 4. prompts for selection (supports multi-select: `1 3` or `1,3`)
 5. warns if any selected process is owned by root
 6. confirms before killing (unless --force)
